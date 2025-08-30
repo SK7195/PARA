@@ -15,7 +15,7 @@ public class LoyaltyManager {
     private static final String DB_PASS = "";
     public static boolean addPoints(int clientId, int points, String reason) {
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
-            // Mettre à jour le solde de points
+
             String updateSql = "UPDATE clients SET loyalty_points = loyalty_points + ? WHERE id = ?";
             PreparedStatement updateStmt = conn.prepareStatement(updateSql);
             updateStmt.setInt(1, points);
@@ -24,7 +24,6 @@ public class LoyaltyManager {
             int rowsUpdated = updateStmt.executeUpdate();
             
             if (rowsUpdated > 0) {
-                // Enregistrer dans l'historique
                 String historySql = "INSERT INTO loyalty_history (client_id, points_change, reason) VALUES (?, ?, ?)";
                 PreparedStatement historyStmt = conn.prepareStatement(historySql);
                 historyStmt.setInt(1, clientId);
