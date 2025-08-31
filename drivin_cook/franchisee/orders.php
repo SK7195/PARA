@@ -22,6 +22,63 @@ if (!$franchisee_id) {
     exit();
 }
 
+// API pour récupérer les produits d'un entrepôt - DOIT ÊTRE EN PREMIER
+if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
+    $warehouse_id = (int)$_GET['warehouse'];
+    
+    try {
+        // Récupérer TOUS les produits de l'entrepôt (même ceux avec stock 0)
+        $products_query = $pdo->prepare("
+            SELECT id, name, category, price, stock_quantity 
+            FROM products 
+            WHERE warehouse_id = ?
+            ORDER BY category, name
+        ");
+        $products_query->execute([$warehouse_id]);
+        $products = $products_query->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Debug: Compter les produits pour diagnostic
+        $total_products = count($products);
+        $products_with_stock = count(array_filter($products, function($p) { return intval($p['stock_quantity']) > 0; }));
+        
+        // Réponse avec informations de debug
+        $response = [
+            'success' => true,
+            'products' => $products,
+            'debug' => [
+                'warehouse_id' => $warehouse_id,
+                'total_products' => $total_products,
+                'products_with_stock' => $products_with_stock,
+                'message' => "Entrepôt $warehouse_id: $total_products produits au total, $products_with_stock avec stock > 0"
+            ]
+        ];
+        
+    } catch (Exception $e) {
+        $response = [
+            'success' => false,
+            'error' => 'Erreur lors du chargement des produits: ' . $e->getMessage(),
+            'products' => [],
+            'debug' => [
+                'warehouse_id' => $warehouse_id,
+                'total_products' => 0,
+                'products_with_stock' => 0,
+                'message' => "Erreur: " . $e->getMessage()
+            ]
+        ];
+    }
+    
+    // IMPORTANT: Nettoyer le buffer de sortie avant d'envoyer le JSON
+    if (ob_get_level()) {
+        ob_clean();
+    }
+    
+    // S'assurer qu'on renvoie du JSON valide
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-cache');
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
 // Traitement de la nouvelle commande
 if ($_POST && $action === 'new') {
     $warehouse_id = $_POST['warehouse_id'] ?? 0;
@@ -134,23 +191,6 @@ $stmt = $pdo->prepare("
 ");
 $stmt->execute([$franchisee_id]);
 $my_orders = $stmt->fetchAll();
-
-// API pour récupérer les produits d'un entrepôt
-if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
-    $warehouse_id = (int)$_GET['warehouse'];
-    $products = $pdo->prepare("
-        SELECT id, name, category, price, stock_quantity 
-        FROM products 
-        WHERE warehouse_id = ? AND stock_quantity >= 0
-        ORDER BY category, name
-    ");
-    $products->execute([$warehouse_id]);
-    $products = $products->fetchAll();
-    
-    header('Content-Type: application/json');
-    echo json_encode($products);
-    exit();
-}
 ?>
 
 <div class="fade-in">
@@ -204,7 +244,10 @@ if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
                     </div>
 
                     <div id="productsSection" style="display: none;">
-                        <h6><i class="fas fa-boxes me-2"></i>Sélection des produits</h6>
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6><i class="fas fa-boxes me-2"></i>Sélection des produits</h6>
+                            <small id="debugInfo" class="text-muted"></small>
+                        </div>
                         <div id="productsList"></div>
                         
                         <div class="mt-3">
@@ -428,6 +471,7 @@ function loadProducts() {
     const warehouseId = document.getElementById('warehouse_id').value;
     const productsSection = document.getElementById('productsSection');
     const productsList = document.getElementById('productsList');
+    const debugInfo = document.getElementById('debugInfo');
     
     if (!warehouseId) {
         productsSection.style.display = 'none';
@@ -437,24 +481,85 @@ function loadProducts() {
     // Afficher un loader
     productsList.innerHTML = '<div class="text-center py-3"><i class="fas fa-spinner fa-spin"></i> Chargement des produits...</div>';
     productsSection.style.display = 'block';
+    debugInfo.textContent = 'Chargement...';
     
-    fetch(`?warehouse=${warehouseId}`)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Erreur lors du chargement');
+    // Construire l'URL de façon plus propre
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.set('warehouse', warehouseId);
+    
+    fetch(currentUrl.href, {
+        method: 'GET',
+        headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => {
+        console.log('Status:', response.status);
+        console.log('Headers:', [...response.headers.entries()]);
+        
+        // Vérifier que la réponse est ok
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        // Lire le contenu brut pour diagnostic
+        return response.text().then(text => {
+            console.log('Réponse brute:', text.substring(0, 500) + (text.length > 500 ? '...' : ''));
+            
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                console.error('Erreur de parsing JSON:', e);
+                console.error('Contenu reçu:', text);
+                throw new Error('Réponse invalide du serveur (pas de JSON valide)');
             }
-            return response.json();
-        })
-        .then(data => {
-            products = data;
-            selectedProducts = {}; // Réinitialiser les sélections
-            displayProducts();
-            updateTotal();
-        })
-        .catch(error => {
-            productsList.innerHTML = '<div class="alert alert-danger">Erreur lors du chargement des produits</div>';
-            console.error('Erreur:', error);
         });
+    })
+    .then(data => {
+        console.log('Données parsées:', data);
+        
+        // Vérifier la structure de la réponse
+        if (!data) {
+            throw new Error('Données vides reçues');
+        }
+        
+        if (data.success === false) {
+            throw new Error(data.error || 'Erreur serveur inconnue');
+        }
+        
+        // Extraire les produits
+        products = data.products || [];
+        selectedProducts = {}; // Réinitialiser les sélections
+        
+        // Afficher les informations de debug
+        if (data.debug) {
+            debugInfo.textContent = data.debug.message;
+            debugInfo.className = 'text-info small';
+            console.log('Debug info:', data.debug);
+        }
+        
+        displayProducts();
+        updateTotal();
+    })
+    .catch(error => {
+        console.error('Erreur complète:', error);
+        
+        let errorMessage = 'Erreur lors du chargement des produits';
+        if (error.message) {
+            errorMessage += ': ' + error.message;
+        }
+        
+        productsList.innerHTML = `
+            <div class="alert alert-danger">
+                <strong>Erreur:</strong> ${errorMessage}
+                <br><small class="text-muted">Vérifiez la console (F12) pour plus de détails.</small>
+                <br><small class="text-muted">Entrepôt ID: ${warehouseId}</small>
+            </div>
+        `;
+        debugInfo.textContent = 'Erreur de chargement';
+        debugInfo.className = 'text-danger small';
+    });
 }
 
 function displayProducts() {
@@ -480,24 +585,34 @@ function displayProducts() {
             html += `<tr class="table-secondary"><td colspan="5"><strong>${categoryLabels[category]}</strong></td></tr>`;
             
             categoryProducts.forEach((product) => {
-                const stockClass = product.stock_quantity < 10 ? 'bg-warning text-dark' : 
-                                  product.stock_quantity < 5 ? 'bg-danger' : 'bg-success';
+                const stockQuantity = parseInt(product.stock_quantity) || 0;
+                const stockClass = stockQuantity === 0 ? 'bg-danger text-white' :
+                                  stockQuantity < 5 ? 'bg-warning text-dark' : 
+                                  stockQuantity < 10 ? 'bg-info' : 'bg-success';
+                
+                const isOutOfStock = stockQuantity === 0;
+                const maxOrderQuantity = Math.max(0, stockQuantity);
                 
                 html += `
-                    <tr ${product.stock_quantity === 0 ? 'class="table-light text-muted"' : ''}>
-                        <td>${product.name} ${product.stock_quantity === 0 ? '(Rupture)' : ''}</td>
+                    <tr ${isOutOfStock ? 'class="table-light text-muted"' : ''}>
+                        <td>
+                            ${product.name} 
+                            ${isOutOfStock ? '<span class="badge bg-danger ms-2">Rupture</span>' : ''}
+                        </td>
                         <td><span class="badge bg-secondary">${categoryLabels[product.category]}</span></td>
                         <td>${parseFloat(product.price).toFixed(2)} €</td>
-                        <td><span class="badge ${stockClass}">${product.stock_quantity}</span></td>
+                        <td><span class="badge ${stockClass}">${stockQuantity}</span></td>
                         <td>
                             <div class="input-group input-group-sm" style="width: 120px;">
                                 <input type="number" class="form-control" name="quantities[]" 
-                                       min="0" max="${product.stock_quantity}" value="0" 
-                                       ${product.stock_quantity === 0 ? 'disabled' : ''}
+                                       min="0" max="${maxOrderQuantity}" value="0" 
+                                       ${isOutOfStock ? 'disabled title="Produit en rupture de stock"' : ''}
                                        onchange="updateProductSelection(${product.id}, this.value, ${product.price})"
-                                       oninput="validateQuantity(this, ${product.stock_quantity})">
+                                       oninput="validateQuantity(this, ${maxOrderQuantity})">
                                 <input type="hidden" name="products[]" value="${product.id}">
                             </div>
+                            ${isOutOfStock ? '<small class="text-danger">Stock épuisé</small>' : 
+                              stockQuantity < 10 ? '<small class="text-warning">Stock faible</small>' : ''}
                         </td>
                     </tr>
                 `;
@@ -506,6 +621,26 @@ function displayProducts() {
     });
     
     html += '</tbody></table></div>';
+    
+    // Ajouter un message de résumé
+    const totalProducts = products.length;
+    const availableProducts = products.filter(p => (parseInt(p.stock_quantity) || 0) > 0).length;
+    const outOfStockProducts = totalProducts - availableProducts;
+    
+    if (outOfStockProducts > 0) {
+        html += `<div class="alert alert-warning mt-2">
+            <small><i class="fas fa-exclamation-triangle me-2"></i>
+            ${totalProducts} produits au total - ${availableProducts} disponibles, ${outOfStockProducts} en rupture
+            </small>
+        </div>`;
+    } else {
+        html += `<div class="alert alert-success mt-2">
+            <small><i class="fas fa-check-circle me-2"></i>
+            ${totalProducts} produits disponibles
+            </small>
+        </div>`;
+    }
+    
     productsList.innerHTML = html;
 }
 
@@ -546,7 +681,8 @@ function updateTotal() {
     // Afficher le nombre d'articles sélectionnés
     const itemCount = Object.keys(selectedProducts).length;
     if (itemCount > 0) {
-        submitBtn.innerHTML = `<i class="fas fa-shopping-cart me-2"></i>Passer la commande (${itemCount} article${itemCount > 1 ? 's' : ''})`;
+        const totalQuantity = Object.values(selectedProducts).reduce((sum, item) => sum + item.quantity, 0);
+        submitBtn.innerHTML = `<i class="fas fa-shopping-cart me-2"></i>Passer la commande (${itemCount} produit${itemCount > 1 ? 's' : ''}, ${totalQuantity} unité${totalQuantity > 1 ? 's' : ''})`;
     } else {
         submitBtn.innerHTML = '<i class="fas fa-shopping-cart me-2"></i>Passer la commande';
     }
@@ -564,6 +700,15 @@ document.getElementById('orderForm')?.addEventListener('submit', function(e) {
     if (!warehouseId) {
         e.preventDefault();
         alert('Veuillez sélectionner un entrepôt');
+        return false;
+    }
+    
+    // Confirmation avant envoi
+    const itemCount = Object.keys(selectedProducts).length;
+    const total = Object.values(selectedProducts).reduce((sum, item) => sum + (item.quantity * item.price), 0);
+    
+    if (!confirm(`Confirmer la commande de ${itemCount} produit${itemCount > 1 ? 's' : ''} pour un montant de ${total.toFixed(2)} € ?`)) {
+        e.preventDefault();
         return false;
     }
     
