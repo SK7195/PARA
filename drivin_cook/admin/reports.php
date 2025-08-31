@@ -27,8 +27,8 @@ function generateReportContent($type, $month, $pdo) {
         case 'sales':
             $sales = $pdo->query("
                 SELECT f.name, f.company_name, 
-                       SUM(s.daily_revenue) as total_revenue,
-                       SUM(s.commission_due) as total_commission
+                       COALESCE(SUM(s.daily_revenue), 0) as total_revenue,
+                       COALESCE(SUM(s.commission_due), 0) as total_commission
                 FROM sales s
                 JOIN franchisees f ON s.franchisee_id = f.id
                 WHERE DATE_FORMAT(s.sale_date, '%Y-%m') = '$month'
@@ -72,8 +72,8 @@ function generateReportContent($type, $month, $pdo) {
 
 $monthly_sales = $pdo->query("
     SELECT DATE_FORMAT(sale_date, '%Y-%m') as month,
-           SUM(daily_revenue) as revenue,
-           SUM(commission_due) as commission
+           COALESCE(SUM(daily_revenue), 0) as revenue,
+           COALESCE(SUM(commission_due), 0) as commission
     FROM sales
     WHERE sale_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
     GROUP BY month
@@ -83,8 +83,8 @@ $monthly_sales = $pdo->query("
 $franchisee_performance = $pdo->query("
     SELECT f.name, f.company_name,
            COUNT(DISTINCT s.sale_date) as active_days,
-           SUM(s.daily_revenue) as total_revenue,
-           AVG(s.daily_revenue) as avg_revenue
+           COALESCE(SUM(s.daily_revenue), 0) as total_revenue,
+           COALESCE(AVG(s.daily_revenue), 0) as avg_revenue
     FROM franchisees f
     LEFT JOIN sales s ON f.id = s.franchisee_id 
         AND s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
@@ -114,27 +114,32 @@ $franchisee_performance = $pdo->query("
 
     <div class="row mb-4">
         <?php
+        // CORRECTION: Protection contre les valeurs NULL avec COALESCE dans les requêtes
         $current_month_revenue = $pdo->query("
             SELECT COALESCE(SUM(daily_revenue), 0) FROM sales 
-            WHERE MONTH(sale_date) = MONTH(CURRENT_DATE)
-        ")->fetchColumn();
+            WHERE MONTH(sale_date) = MONTH(CURRENT_DATE) 
+            AND YEAR(sale_date) = YEAR(CURRENT_DATE)
+        ")->fetchColumn() ?: 0;
         
         $last_month_revenue = $pdo->query("
             SELECT COALESCE(SUM(daily_revenue), 0) FROM sales 
             WHERE MONTH(sale_date) = MONTH(DATE_SUB(CURRENT_DATE, INTERVAL 1 MONTH))
-        ")->fetchColumn();
+            AND YEAR(sale_date) = YEAR(DATE_SUB(CURRENT_DATE, INTERVAL 1 MONTH))
+        ")->fetchColumn() ?: 0;
         
         $growth = $last_month_revenue > 0 ? (($current_month_revenue - $last_month_revenue) / $last_month_revenue) * 100 : 0;
         
         $active_franchisees = $pdo->query("
             SELECT COUNT(DISTINCT franchisee_id) FROM sales 
             WHERE MONTH(sale_date) = MONTH(CURRENT_DATE)
-        ")->fetchColumn();
+            AND YEAR(sale_date) = YEAR(CURRENT_DATE)
+        ")->fetchColumn() ?: 0;
         
         $total_commission = $pdo->query("
             SELECT COALESCE(SUM(commission_due), 0) FROM sales 
             WHERE MONTH(sale_date) = MONTH(CURRENT_DATE)
-        ")->fetchColumn();
+            AND YEAR(sale_date) = YEAR(CURRENT_DATE)
+        ")->fetchColumn() ?: 0;
         ?>
         
         <div class="col-md-3">
@@ -183,7 +188,7 @@ $franchisee_performance = $pdo->query("
             <div class="stat-card">
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
-                        <h3><?php echo number_format($current_month_revenue ? $current_month_revenue / max($active_franchisees, 1) : 0, 0); ?> €</h3>
+                        <h3><?php echo number_format($current_month_revenue && $active_franchisees > 0 ? $current_month_revenue / $active_franchisees : 0, 0); ?> €</h3>
                         <p>CA moyen</p>
                         <small class="text-muted">Par franchisé</small>
                     </div>
@@ -194,7 +199,6 @@ $franchisee_performance = $pdo->query("
     </div>
 
     <div class="row">
-   
         <div class="col-md-8">
             <div class="card">
                 <div class="card-header">
@@ -203,20 +207,21 @@ $franchisee_performance = $pdo->query("
                 <div class="card-body">
                     <canvas id="salesChart" height="100"></canvas>
                     <script>
-              
                         document.addEventListener('DOMContentLoaded', function() {
                             const ctx = document.getElementById('salesChart');
                             const data = <?php echo json_encode($monthly_sales); ?>;
                             
                             let chartHtml = '<div class="row text-center">';
                             data.forEach(item => {
-                                const height = Math.min((item.revenue / 50000) * 200, 200);
+                                // CORRECTION: Vérification et conversion sécurisée
+                                const revenue = parseFloat(item.revenue) || 0;
+                                const height = Math.min((revenue / 50000) * 200, 200);
                                 chartHtml += `
                                     <div class="col">
                                         <div style="background: linear-gradient(to top, #007bff, #0056b3); 
                                                     height: ${height}px; margin-bottom: 10px; border-radius: 4px;"></div>
                                         <small>${item.month}</small><br>
-                                        <small>${Math.round(item.revenue)} €</small>
+                                        <small>${Math.round(revenue)} €</small>
                                     </div>
                                 `;
                             });
@@ -239,6 +244,11 @@ $franchisee_performance = $pdo->query("
                         <p class="text-muted text-center">Aucune donnée disponible</p>
                     <?php else: ?>
                         <?php foreach (array_slice($franchisee_performance, 0, 5) as $index => $perf): ?>
+                            <?php
+                            // CORRECTION: Protection contre les valeurs NULL
+                            $totalRevenue = floatval($perf['total_revenue']) ?: 0;
+                            $activeDays = intval($perf['active_days']) ?: 0;
+                            ?>
                             <div class="d-flex align-items-center mb-3">
                                 <div class="me-3">
                                     <?php if ($index < 3): ?>
@@ -252,12 +262,12 @@ $franchisee_performance = $pdo->query("
                                 <div class="flex-grow-1">
                                     <div class="fw-bold"><?php echo htmlspecialchars($perf['name']); ?></div>
                                     <small class="text-muted">
-                                        <?php echo number_format($perf['total_revenue'], 0); ?> € 
-                                        (<?php echo $perf['active_days']; ?> jours actifs)
+                                        <?php echo number_format($totalRevenue, 0); ?> € 
+                                        (<?php echo $activeDays; ?> jours actifs)
                                     </small>
                                     <div class="progress mt-1" style="height: 6px;">
                                         <div class="progress-bar bg-primary" 
-                                             style="width: <?php echo min(($perf['total_revenue'] / 100000) * 100, 100); ?>%"></div>
+                                             style="width: <?php echo min(($totalRevenue / 100000) * 100, 100); ?>%"></div>
                                     </div>
                                 </div>
                             </div>

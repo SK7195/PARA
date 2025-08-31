@@ -261,7 +261,6 @@ $pageTitle = t('menu_title');
             localStorage.setItem('cart', JSON.stringify(cart));
             updateCartCount();
             
-            // Animation
             this.innerHTML = '<i class="fas fa-check me-2"></i>Ajouté !';
             this.classList.remove('btn-success');
             this.classList.add('btn-success');

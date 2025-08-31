@@ -68,7 +68,6 @@ if ($_POST) {
     }
 }
 
-// Suppression
 if (isset($_GET['delete'])) {
     $id = (int)$_GET['delete'];
     $stmt = $pdo->prepare("DELETE FROM menus WHERE id = ?");
@@ -81,7 +80,6 @@ if (isset($_GET['delete'])) {
     exit();
 }
 
-// Toggle disponibilité
 if (isset($_GET['toggle'])) {
     $id = (int)$_GET['toggle'];
     $stmt = $pdo->prepare("UPDATE menus SET available = !available WHERE id = ?");
@@ -92,7 +90,6 @@ if (isset($_GET['toggle'])) {
     exit();
 }
 
-// Récupération du menu à éditer
 $menu_to_edit = null;
 if ($action === 'edit' && isset($_GET['id'])) {
     $stmt = $pdo->prepare("SELECT * FROM menus WHERE id = ?");
@@ -100,7 +97,6 @@ if ($action === 'edit' && isset($_GET['id'])) {
     $menu_to_edit = $stmt->fetch();
 }
 
-// Liste des menus avec statistiques
 $menus = $pdo->query("
     SELECT m.*, 
            COUNT(coi.id) as order_count,
@@ -112,7 +108,6 @@ $menus = $pdo->query("
     ORDER BY m.category, m.name_fr
 ")->fetchAll();
 
-// Statistiques générales
 $stats = $pdo->query("
     SELECT 
         COUNT(*) as total_menus,
@@ -123,7 +118,6 @@ $stats = $pdo->query("
     FROM menus
 ")->fetch();
 
-// Statistiques par catégorie
 $category_stats = $pdo->query("
     SELECT 
         category,
@@ -155,7 +149,6 @@ $category_stats = $pdo->query("
     <?php endif; ?>
 
     <?php if ($action === 'add' || $action === 'edit'): ?>
-        <!-- Formulaire d'ajout/modification -->
         <div class="card">
             <div class="card-header">
                 <h5><?php echo $action === 'add' ? 'Nouveau plat' : 'Modifier le plat'; ?></h5>
@@ -166,7 +159,6 @@ $category_stats = $pdo->query("
                         <input type="hidden" name="id" value="<?php echo $menu_to_edit['id']; ?>">
                     <?php endif; ?>
 
-                    <!-- Noms multilingues -->
                     <div class="row">
                         <div class="col-md-4">
                             <div class="mb-3">
@@ -191,7 +183,7 @@ $category_stats = $pdo->query("
                         </div>
                     </div>
 
-                    <!-- Descriptions multilingues -->
+
                     <div class="row">
                         <div class="col-md-4">
                             <div class="mb-3">
@@ -213,7 +205,6 @@ $category_stats = $pdo->query("
                         </div>
                     </div>
 
-                    <!-- Prix et catégorie -->
                     <div class="row">
                         <div class="col-md-3">
                             <div class="mb-3">
@@ -265,7 +256,6 @@ $category_stats = $pdo->query("
         </div>
 
     <?php else: ?>
-        <!-- Statistiques -->
         <div class="row mb-4">
             <div class="col-md-2">
                 <div class="stat-card stat-card-info">
@@ -319,7 +309,7 @@ $category_stats = $pdo->query("
             </div>
         </div>
 
-        <!-- Liste des menus -->
+
         <div class="card">
             <div class="card-header">
                 <h5>Liste des plats (<?php echo count($menus); ?>)</h5>

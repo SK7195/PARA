@@ -81,18 +81,19 @@ if ($action === 'edit' && isset($_GET['id'])) {
     $client_to_edit = $stmt->fetch();
 }
 
+// CORRECTION: Requête SQL corrigée pour respecter only_full_group_by
 $clients = $pdo->query("
-    SELECT c.*, 
+    SELECT c.id, c.firstname, c.lastname, c.email, c.phone, c.language, c.loyalty_points, c.created_at,
            COUNT(co.id) as total_orders,
            COALESCE(SUM(co.total_amount), 0) as total_spent,
            CASE 
-               WHEN ns.subscribed = 1 THEN 'Oui' 
+               WHEN MAX(ns.subscribed) = 1 THEN 'Oui' 
                ELSE 'Non' 
            END as newsletter_subscribed
     FROM clients c
     LEFT JOIN client_orders co ON c.id = co.client_id AND co.status IN ('confirmed', 'completed')
     LEFT JOIN newsletter_subscribers ns ON c.id = ns.client_id
-    GROUP BY c.id
+    GROUP BY c.id, c.firstname, c.lastname, c.email, c.phone, c.language, c.loyalty_points, c.created_at
     ORDER BY c.created_at DESC
 ")->fetchAll();
 ?>

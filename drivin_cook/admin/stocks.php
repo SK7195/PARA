@@ -67,14 +67,15 @@ $products = $pdo->query("
     ORDER BY w.name, p.name
 ")->fetchAll();
 
+// CORRECTION: Ajout de vérification NULL pour éviter les erreurs number_format
 $warehouse_stats = $pdo->query("
     SELECT w.name, w.manager_name,
            COUNT(p.id) as product_count,
-           SUM(p.stock_quantity) as total_items,
-           SUM(p.stock_quantity * p.price) as total_value
+           COALESCE(SUM(p.stock_quantity), 0) as total_items,
+           COALESCE(SUM(p.stock_quantity * p.price), 0) as total_value
     FROM warehouses w
     LEFT JOIN products p ON w.id = p.warehouse_id
-    GROUP BY w.id
+    GROUP BY w.id, w.name, w.manager_name
     ORDER BY w.name
 ")->fetchAll();
 
@@ -101,7 +102,6 @@ $recent_orders = $pdo->query("
     <?php endif; ?>
 
     <?php if ($action === 'add_product'): ?>
-
         <div class="card mb-4">
             <div class="card-header">
                 <h5>Nouveau produit</h5>
@@ -175,12 +175,13 @@ $recent_orders = $pdo->query("
                         <div>
                             <h6><?php echo htmlspecialchars($stat['name']); ?></h6>
                             <p class="mb-1"><strong><?php echo $stat['product_count']; ?></strong> produits</p>
-                            <p class="mb-1"><?php echo number_format($stat['total_items']); ?> articles</p>
-                            <p class="mb-0"><?php echo number_format($stat['total_value'], 2); ?> € de valeur</p>
+                            <p class="mb-1"><?php echo number_format($stat['total_items'] ?? 0); ?> articles</p>
+                            <p class="mb-0"><?php echo number_format($stat['total_value'] ?? 0, 2); ?> € de valeur</p>
                         </div>
                         <i class="fas fa-warehouse fa-2x opacity-50"></i>
                     </div>
-                    <small class="text-muted">Manager: <?php echo htmlspecialchars($stat['manager_name']); ?></small>
+                    <small class="text-muted">Manager:
+                        <?php echo htmlspecialchars($stat['manager_name'] ?? 'Non assigné'); ?></small>
                 </div>
             </div>
         <?php endforeach; ?>
@@ -210,7 +211,8 @@ $recent_orders = $pdo->query("
                                 </thead>
                                 <tbody>
                                     <?php foreach ($products as $product): ?>
-                                        <tr class="<?php echo $product['stock_quantity'] < 10 ? 'table-warning' : ''; ?>">
+                                        <tr
+                                            class="<?php echo ($product['stock_quantity'] ?? 0) < 10 ? 'table-warning' : ''; ?>">
                                             <td><?php echo htmlspecialchars($product['name']); ?></td>
                                             <td>
                                                 <?php
@@ -222,7 +224,7 @@ $recent_orders = $pdo->query("
                                                 echo $categories[$product['category']] ?? $product['category'];
                                                 ?>
                                             </td>
-                                            <td><?php echo number_format($product['price'], 2); ?> €</td>
+                                            <td><?php echo number_format($product['price'] ?? 0, 2); ?> €</td>
                                             <td><?php echo htmlspecialchars($product['warehouse_name']); ?></td>
                                             <td>
                                                 <form method="POST" action="?action=update_stock"
@@ -230,13 +232,13 @@ $recent_orders = $pdo->query("
                                                     <input type="hidden" name="product_id"
                                                         value="<?php echo $product['id']; ?>">
                                                     <input type="number" name="new_quantity"
-                                                        value="<?php echo $product['stock_quantity']; ?>"
+                                                        value="<?php echo $product['stock_quantity'] ?? 0; ?>"
                                                         class="form-control form-control-sm me-1" style="width: 70px;" min="0">
                                                     <button type="submit" class="btn btn-sm btn-outline-primary">
                                                         <i class="fas fa-check"></i>
                                                     </button>
                                                 </form>
-                                                <?php if ($product['stock_quantity'] < 10): ?>
+                                                <?php if (($product['stock_quantity'] ?? 0) < 10): ?>
                                                     <small class="text-warning"><i
                                                             class="fas fa-exclamation-triangle me-1"></i>Stock faible</small>
                                                 <?php endif; ?>
@@ -278,7 +280,7 @@ $recent_orders = $pdo->query("
                                 <small class="text-muted">
                                     <?php echo htmlspecialchars($order['warehouse_name']); ?><br>
                                     <?php echo date('d/m/Y', strtotime($order['order_date'])); ?> -
-                                    <?php echo number_format($order['total_amount'], 2); ?> €
+                                    <?php echo number_format($order['total_amount'] ?? 0, 2); ?> €
                                 </small>
                             </div>
                         <?php endforeach; ?>
@@ -294,18 +296,21 @@ $recent_orders = $pdo->query("
                     <?php
 
                     $compliance_check = $pdo->query("
-                        SELECT f.name,
-                               COALESCE(SUM(oi.quantity * oi.unit_price), 0) as total_purchases,
-                               COALESCE(SUM(CASE WHEN p.warehouse_id IN (1,2,3,4) THEN oi.quantity * oi.unit_price ELSE 0 END), 0) as driv_purchases
-                        FROM franchisees f
-                        LEFT JOIN stock_orders so ON f.id = so.franchisee_id
-                        LEFT JOIN order_items oi ON so.id = oi.order_id
-                        LEFT JOIN products p ON oi.product_id = p.id
-                        WHERE f.status = 'active'
-                        GROUP BY f.id
-                        HAVING total_purchases > 0
-                        ORDER BY (driv_purchases / total_purchases) ASC
-                    ")->fetchAll();
+    SELECT * FROM (
+        SELECT f.name,
+               COALESCE(SUM(oi.quantity * oi.unit_price), 0) as total_purchases,
+               COALESCE(SUM(CASE WHEN p.warehouse_id IN (1,2,3,4) THEN oi.quantity * oi.unit_price ELSE 0 END), 0) as driv_purchases
+        FROM franchisees f
+        LEFT JOIN stock_orders so ON f.id = so.franchisee_id
+        LEFT JOIN order_items oi ON so.id = oi.order_id
+        LEFT JOIN products p ON oi.product_id = p.id
+        WHERE f.status = 'active'
+        GROUP BY f.id, f.name
+    ) AS subquery
+    WHERE total_purchases > 0
+    ORDER BY (driv_purchases / GREATEST(total_purchases, 1)) ASC
+")->fetchAll();
+
                     ?>
 
                     <?php if (empty($compliance_check)): ?>

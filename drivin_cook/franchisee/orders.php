@@ -22,12 +22,31 @@ if (!$franchisee_id) {
     exit();
 }
 
+// Traitement de la nouvelle commande
 if ($_POST && $action === 'new') {
     $warehouse_id = $_POST['warehouse_id'] ?? 0;
     $products = $_POST['products'] ?? [];
     $quantities = $_POST['quantities'] ?? [];
     
-    if ($warehouse_id && !empty($products) && !empty($quantities)) {
+    // Validation améliorée
+    $errors = [];
+    
+    if (!$warehouse_id) {
+        $errors[] = 'Veuillez sélectionner un entrepôt';
+    }
+    
+    if (empty($products) || empty($quantities)) {
+        $errors[] = 'Veuillez sélectionner au moins un produit';
+    }
+    
+    // Vérification que l'entrepôt existe
+    $stmt = $pdo->prepare("SELECT id FROM warehouses WHERE id = ?");
+    $stmt->execute([$warehouse_id]);
+    if (!$stmt->fetchColumn()) {
+        $errors[] = 'Entrepôt non valide';
+    }
+    
+    if (empty($errors)) {
         try {
             $pdo->beginTransaction();
             
@@ -36,33 +55,49 @@ if ($_POST && $action === 'new') {
             
             foreach ($products as $index => $product_id) {
                 if ($product_id && isset($quantities[$index]) && $quantities[$index] > 0) {
-                    $stmt = $pdo->prepare("SELECT price FROM products WHERE id = ? AND warehouse_id = ?");
+                    // Vérifier le stock disponible
+                    $stmt = $pdo->prepare("
+                        SELECT price, stock_quantity, name 
+                        FROM products 
+                        WHERE id = ? AND warehouse_id = ?
+                    ");
                     $stmt->execute([$product_id, $warehouse_id]);
-                    $price = $stmt->fetchColumn();
+                    $product = $stmt->fetch();
                     
-                    if ($price) {
+                    if ($product) {
                         $quantity = (int)$quantities[$index];
-                        $item_total = $price * $quantity;
+                        
+                        // Vérifier si le stock est suffisant
+                        if ($quantity > $product['stock_quantity']) {
+                            throw new Exception("Stock insuffisant pour {$product['name']} (disponible: {$product['stock_quantity']})");
+                        }
+                        
+                        $item_total = $product['price'] * $quantity;
                         $total_amount += $item_total;
                         
                         $order_items[] = [
                             'product_id' => $product_id,
                             'quantity' => $quantity,
-                            'unit_price' => $price
+                            'unit_price' => $product['price']
                         ];
                     }
                 }
             }
             
             if ($total_amount > 0 && !empty($order_items)) {
-
+                // Insérer la commande
                 $stmt = $pdo->prepare("INSERT INTO stock_orders (franchisee_id, warehouse_id, total_amount) VALUES (?, ?, ?)");
                 $stmt->execute([$franchisee_id, $warehouse_id, $total_amount]);
                 $order_id = $pdo->lastInsertId();
                 
-                $stmt = $pdo->prepare("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)");
+                // Insérer les items et optionnellement mettre à jour le stock
+                $stmt_item = $pdo->prepare("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)");
+                $stmt_stock = $pdo->prepare("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?");
+                
                 foreach ($order_items as $item) {
-                    $stmt->execute([$order_id, $item['product_id'], $item['quantity'], $item['unit_price']]);
+                    $stmt_item->execute([$order_id, $item['product_id'], $item['quantity'], $item['unit_price']]);
+                    // Décrémenter le stock (optionnel - à activer selon vos besoins)
+                    // $stmt_stock->execute([$item['quantity'], $item['product_id']]);
                 }
                 
                 $pdo->commit();
@@ -78,29 +113,35 @@ if ($_POST && $action === 'new') {
             $error = 'Erreur lors de la commande : ' . $e->getMessage();
         }
     } else {
-        $error = 'Veuillez sélectionner un entrepôt et au moins un produit';
+        $error = implode('<br>', $errors);
     }
 }
 
+// Récupération des entrepôts
 $warehouses = $pdo->query("SELECT * FROM warehouses ORDER BY name")->fetchAll();
 
-$my_orders = $pdo->query("
+// Récupération des commandes du franchisé
+$stmt = $pdo->prepare("
     SELECT so.*, w.name as warehouse_name,
-           COUNT(oi.id) as item_count
+           COUNT(oi.id) as item_count,
+           SUM(oi.quantity) as total_items
     FROM stock_orders so
     JOIN warehouses w ON so.warehouse_id = w.id
     LEFT JOIN order_items oi ON so.id = oi.order_id
-    WHERE so.franchisee_id = $franchisee_id
+    WHERE so.franchisee_id = ?
     GROUP BY so.id
     ORDER BY so.order_date DESC
-")->fetchAll();
+");
+$stmt->execute([$franchisee_id]);
+$my_orders = $stmt->fetchAll();
 
+// API pour récupérer les produits d'un entrepôt
 if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
     $warehouse_id = (int)$_GET['warehouse'];
     $products = $pdo->prepare("
         SELECT id, name, category, price, stock_quantity 
         FROM products 
-        WHERE warehouse_id = ? AND stock_quantity > 0
+        WHERE warehouse_id = ? AND stock_quantity >= 0
         ORDER BY category, name
     ");
     $products->execute([$warehouse_id]);
@@ -130,8 +171,12 @@ if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
         <div class="alert alert-danger"><?php echo $error; ?></div>
     <?php endif; ?>
 
+    <?php if (isset($_SESSION['success'])): ?>
+        <div class="alert alert-success"><?php echo $_SESSION['success']; unset($_SESSION['success']); ?></div>
+    <?php endif; ?>
+
     <?php if ($action === 'new'): ?>
-      
+        <!-- Formulaire de nouvelle commande -->
         <div class="card">
             <div class="card-header">
                 <h5><i class="fas fa-plus me-2"></i>Nouvelle commande de stock</h5>
@@ -176,7 +221,7 @@ if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
         </div>
 
     <?php else: ?>
-       
+        <!-- Liste des commandes -->
         <div class="card">
             <div class="card-header">
                 <h5>Historique de mes commandes (<?php echo count($my_orders); ?>)</h5>
@@ -210,6 +255,9 @@ if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
                                         <td><?php echo htmlspecialchars($order['warehouse_name']); ?></td>
                                         <td>
                                             <span class="badge bg-info"><?php echo $order['item_count']; ?> article<?php echo $order['item_count'] > 1 ? 's' : ''; ?></span>
+                                            <?php if ($order['total_items']): ?>
+                                                <br><small class="text-muted"><?php echo $order['total_items']; ?> unité<?php echo $order['total_items'] > 1 ? 's' : ''; ?></small>
+                                            <?php endif; ?>
                                         </td>
                                         <td><strong><?php echo number_format($order['total_amount'], 2); ?> €</strong></td>
                                         <td>
@@ -275,10 +323,10 @@ if (isset($_GET['warehouse']) && is_numeric($_GET['warehouse'])) {
 </div>
 
 <?php if ($action === 'list'): ?>
-   
+    <!-- Modales pour les détails des commandes -->
     <?php foreach ($my_orders as $order): ?>
         <?php
-        
+        // Récupération des détails de la commande
         $stmt = $pdo->prepare("
             SELECT oi.*, p.name as product_name, p.category 
             FROM order_items oi
@@ -386,18 +434,37 @@ function loadProducts() {
         return;
     }
     
+    // Afficher un loader
+    productsList.innerHTML = '<div class="text-center py-3"><i class="fas fa-spinner fa-spin"></i> Chargement des produits...</div>';
+    productsSection.style.display = 'block';
+    
     fetch(`?warehouse=${warehouseId}`)
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Erreur lors du chargement');
+            }
+            return response.json();
+        })
         .then(data => {
             products = data;
+            selectedProducts = {}; // Réinitialiser les sélections
             displayProducts();
-            productsSection.style.display = 'block';
             updateTotal();
+        })
+        .catch(error => {
+            productsList.innerHTML = '<div class="alert alert-danger">Erreur lors du chargement des produits</div>';
+            console.error('Erreur:', error);
         });
 }
 
 function displayProducts() {
     const productsList = document.getElementById('productsList');
+    
+    if (products.length === 0) {
+        productsList.innerHTML = '<div class="alert alert-info">Aucun produit disponible dans cet entrepôt</div>';
+        return;
+    }
+    
     let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr><th>Produit</th><th>Catégorie</th><th>Prix</th><th>Stock</th><th>Quantité</th></tr></thead><tbody>';
     
     const categories = ['ingredient', 'prepared_dish', 'beverage'];
@@ -412,18 +479,23 @@ function displayProducts() {
         if (categoryProducts.length > 0) {
             html += `<tr class="table-secondary"><td colspan="5"><strong>${categoryLabels[category]}</strong></td></tr>`;
             
-            categoryProducts.forEach((product, index) => {
+            categoryProducts.forEach((product) => {
+                const stockClass = product.stock_quantity < 10 ? 'bg-warning text-dark' : 
+                                  product.stock_quantity < 5 ? 'bg-danger' : 'bg-success';
+                
                 html += `
-                    <tr>
-                        <td>${product.name}</td>
+                    <tr ${product.stock_quantity === 0 ? 'class="table-light text-muted"' : ''}>
+                        <td>${product.name} ${product.stock_quantity === 0 ? '(Rupture)' : ''}</td>
                         <td><span class="badge bg-secondary">${categoryLabels[product.category]}</span></td>
                         <td>${parseFloat(product.price).toFixed(2)} €</td>
-                        <td><span class="badge ${product.stock_quantity < 10 ? 'bg-warning text-dark' : 'bg-success'}">${product.stock_quantity}</span></td>
+                        <td><span class="badge ${stockClass}">${product.stock_quantity}</span></td>
                         <td>
                             <div class="input-group input-group-sm" style="width: 120px;">
                                 <input type="number" class="form-control" name="quantities[]" 
                                        min="0" max="${product.stock_quantity}" value="0" 
-                                       onchange="updateProductSelection(${product.id}, this.value, ${product.price})">
+                                       ${product.stock_quantity === 0 ? 'disabled' : ''}
+                                       onchange="updateProductSelection(${product.id}, this.value, ${product.price})"
+                                       oninput="validateQuantity(this, ${product.stock_quantity})">
                                 <input type="hidden" name="products[]" value="${product.id}">
                             </div>
                         </td>
@@ -435,6 +507,15 @@ function displayProducts() {
     
     html += '</tbody></table></div>';
     productsList.innerHTML = html;
+}
+
+function validateQuantity(input, maxStock) {
+    const value = parseInt(input.value) || 0;
+    if (value > maxStock) {
+        input.value = maxStock;
+        input.classList.add('is-invalid');
+        setTimeout(() => input.classList.remove('is-invalid'), 2000);
+    }
 }
 
 function updateProductSelection(productId, quantity, price) {
@@ -459,8 +540,35 @@ function updateTotal() {
     });
     
     document.getElementById('totalAmount').textContent = total.toFixed(2);
-    document.getElementById('submitOrder').disabled = total === 0;
+    const submitBtn = document.getElementById('submitOrder');
+    submitBtn.disabled = total === 0;
+    
+    // Afficher le nombre d'articles sélectionnés
+    const itemCount = Object.keys(selectedProducts).length;
+    if (itemCount > 0) {
+        submitBtn.innerHTML = `<i class="fas fa-shopping-cart me-2"></i>Passer la commande (${itemCount} article${itemCount > 1 ? 's' : ''})`;
+    } else {
+        submitBtn.innerHTML = '<i class="fas fa-shopping-cart me-2"></i>Passer la commande';
+    }
 }
+
+// Validation avant soumission
+document.getElementById('orderForm')?.addEventListener('submit', function(e) {
+    if (Object.keys(selectedProducts).length === 0) {
+        e.preventDefault();
+        alert('Veuillez sélectionner au moins un produit');
+        return false;
+    }
+    
+    const warehouseId = document.getElementById('warehouse_id').value;
+    if (!warehouseId) {
+        e.preventDefault();
+        alert('Veuillez sélectionner un entrepôt');
+        return false;
+    }
+    
+    return true;
+});
 </script>
 <?php endif; ?>
 
